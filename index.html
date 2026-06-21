@@ -1,0 +1,468 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Search, Leaf, Droplet, Sun, Thermometer, 
+  Wind, Bug, Sprout, Send, Bot, User, 
+  AlertCircle, Loader2, Info, Moon, Sun as SunIcon,
+  Flower2
+} from 'lucide-react';
+
+// ==========================================
+// API & Configuration
+// ==========================================
+const apiKey = ""; // Injected by execution environment
+
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+const plantSchema = {
+  type: "OBJECT",
+  properties: {
+    name: { type: "STRING" },
+    scientific_name: { type: "STRING" },
+    indoor_outdoor: { type: "STRING" },
+    sunlight: { type: "STRING" },
+    watering: { type: "STRING" },
+    soil: { type: "STRING" },
+    temperature: { type: "STRING" },
+    fertilizer: { type: "STRING" },
+    common_problems: { type: "STRING" },
+    care_tips: { type: "STRING" }
+  },
+  required: ["name", "scientific_name", "indoor_outdoor", "sunlight", "watering", "soil", "temperature", "fertilizer", "common_problems", "care_tips"]
+};
+
+// ==========================================
+// Helper: API Caller with Exponential Backoff
+// ==========================================
+const fetchWithRetry = async (payload, maxRetries = 5) => {
+  const delays = [1000, 2000, 4000, 8000, 16000];
+  
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      const response = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      if (i === maxRetries - 1) throw error;
+      await new Promise(resolve => setTimeout(resolve, delays[i]));
+    }
+  }
+};
+
+// ==========================================
+// Main Application Component
+// ==========================================
+export default function App() {
+  const [searchQuery, setSearchQuery] = useState('Rose');
+  const [plantDetails, setPlantDetails] = useState(null);
+  const [isLoadingPlant, setIsLoadingPlant] = useState(false);
+  const [plantError, setPlantError] = useState(null);
+  const [plantCache, setPlantCache] = useState({});
+
+  const [chatMessages, setChatMessages] = useState([
+    { role: 'model', text: "Hello! I'm PlantGPT. I can help you care for your lovely plants. What would you like to know?" }
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const chatEndRef = useRef(null);
+
+  const [darkMode, setDarkMode] = useState(false);
+
+  useEffect(() => {
+    handleSearch('Rose');
+  }, []);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
+
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+  }, [darkMode]);
+
+  const handleSearch = async (query = searchQuery) => {
+    if (!query.trim()) return;
+    
+    setIsLoadingPlant(true);
+    setPlantError(null);
+    const normalizedQuery = query.toLowerCase().trim();
+
+    if (plantCache[normalizedQuery]) {
+      setPlantDetails(plantCache[normalizedQuery]);
+      setIsLoadingPlant(false);
+      return;
+    }
+
+    const payload = {
+      contents: [{ parts: [{ text: `Provide detailed information about the plant: ${query}` }] }],
+      systemInstruction: { parts: [{ text: "You are a professional botanist. Provide accurate, structured data." }] },
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: plantSchema
+      }
+    };
+
+    try {
+      const data = await fetchWithRetry(payload);
+      const resultText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (resultText) {
+        const parsedData = JSON.parse(resultText);
+        setPlantDetails(parsedData);
+        setPlantCache(prev => ({ ...prev, [normalizedQuery]: parsedData }));
+      } else {
+        throw new Error("No data returned from AI.");
+      }
+    } catch (error) {
+      console.error("Failed to fetch plant details:", error);
+      setPlantError("Could not find plant details. Please check the name and try again.");
+      setPlantDetails(null);
+    } finally {
+      setIsLoadingPlant(false);
+    }
+  };
+
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    if (!chatInput.trim() || isChatLoading) return;
+
+    const userMessage = chatInput.trim();
+    setChatInput('');
+    setChatMessages(prev => [...prev, { role: 'user', text: userMessage }]);
+    setIsChatLoading(true);
+
+    const formattedHistory = chatMessages.map(msg => ({
+      role: msg.role === 'user' ? 'user' : 'model',
+      parts: [{ text: msg.text }]
+    }));
+    formattedHistory.push({ role: 'user', parts: [{ text: userMessage }] });
+
+    let contextStr = "You are PlantGPT, an expert botanist and plant care specialist. Answer only plant-related questions. Provide practical and easy-to-understand advice in a warm, encouraging tone. If symptoms are mentioned, diagnose likely causes and suggest remedies.";
+    if (plantDetails) {
+      contextStr += `\n\nThe user is currently looking at information for: ${plantDetails.name} (${plantDetails.scientific_name}). Use this context if they ask general questions.`;
+    }
+
+    const payload = {
+      contents: formattedHistory,
+      systemInstruction: { parts: [{ text: contextStr }] }
+    };
+
+    try {
+      const data = await fetchWithRetry(payload);
+      const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || "I'm sorry, I couldn't process that request.";
+      setChatMessages(prev => [...prev, { role: 'model', text: responseText }]);
+    } catch (error) {
+      console.error("Chat error:", error);
+      setChatMessages(prev => [...prev, { role: 'model', text: "Sorry, I am having trouble connecting right now. Please try again later." }]);
+    } finally {
+      setIsChatLoading(false);
+    }
+  };
+
+  const formatText = (text) => {
+    return text.split(/(\*\*.*?\*\*)/g).map((part, i) => {
+      if (part.startsWith('**') && part.endsWith('**')) {
+        return <strong key={i} className="font-semibold text-green-900 dark:text-green-300">{part.slice(2, -2)}</strong>;
+      }
+      return <span key={i}>{part}</span>;
+    });
+  };
+
+  return (
+    <div className={`min-h-screen relative overflow-hidden transition-colors duration-500 font-sans ${
+      darkMode 
+        ? 'dark bg-gradient-to-br from-[#022c22] via-[#064e3b] to-[#0f766e] text-green-50' 
+        : 'bg-gradient-to-br from-[#f0fdf4] via-[#dcfce7] to-[#ccfbf1] text-green-950'
+    }`}>
+      
+      {/* Decorative Floral Background Elements */}
+      <div className="absolute top-[-10%] left-[-5%] opacity-[0.03] dark:opacity-[0.05] pointer-events-none transform -rotate-12">
+        <Leaf className="w-96 h-96 text-green-800 dark:text-green-200" />
+      </div>
+      <div className="absolute bottom-[-5%] right-[-5%] opacity-[0.04] dark:opacity-[0.05] pointer-events-none transform rotate-12">
+        <Flower2 className="w-[500px] h-[500px] text-teal-800 dark:text-teal-200" />
+      </div>
+
+      {/* Header */}
+      <header className="relative z-10 bg-white/40 dark:bg-black/20 backdrop-blur-md border-b border-white/50 dark:border-green-900/50 p-4 shadow-sm flex justify-between items-center sticky top-0">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-gradient-to-br from-green-400 to-emerald-600 rounded-xl text-white shadow-lg shadow-green-500/30">
+            <Leaf className="w-6 h-6" />
+          </div>
+          <h1 className="text-2xl font-serif font-bold tracking-wide text-green-900 dark:text-green-100 drop-shadow-sm">
+            Plant Care Assistant
+          </h1>
+        </div>
+        <button 
+          onClick={() => setDarkMode(!darkMode)}
+          className="p-2.5 rounded-full bg-white/60 dark:bg-green-800/60 hover:bg-white dark:hover:bg-green-700 backdrop-blur-sm text-green-800 dark:text-green-200 shadow-sm transition-all border border-white/40 dark:border-green-700/50"
+          aria-label="Toggle Dark Mode"
+        >
+          {darkMode ? <SunIcon className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+        </button>
+      </header>
+
+      {/* Main Layout */}
+      <main className="relative z-10 max-w-7xl mx-auto flex flex-col md:flex-row h-[calc(100vh-73px)] p-2 md:p-4 gap-4">
+        
+        {/* Left Panel: Search & Details */}
+        <section className="w-full md:w-1/2 flex flex-col h-full bg-white/60 dark:bg-green-950/60 backdrop-blur-xl rounded-3xl border border-white/60 dark:border-green-800/50 shadow-xl shadow-green-900/5 overflow-hidden">
+          
+          {/* Search Bar */}
+          <div className="p-6 border-b border-green-200/50 dark:border-green-800/50">
+            <h2 className="text-xs font-bold text-green-700 dark:text-green-400 mb-3 uppercase tracking-widest flex items-center gap-2">
+              <Flower2 className="w-4 h-4" /> Botanical Database
+            </h2>
+            <div className="flex gap-3">
+              <div className="relative flex-1">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-green-600/50 dark:text-green-400/50" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                  placeholder="Discover a plant (e.g., Monstera, Orchid)..."
+                  className="w-full pl-12 pr-4 py-3.5 rounded-2xl border-0 ring-1 ring-green-200 dark:ring-green-800 bg-white/80 dark:bg-green-900/50 focus:outline-none focus:ring-2 focus:ring-green-500 transition-all text-green-900 dark:text-white shadow-inner"
+                />
+              </div>
+              <button
+                onClick={() => handleSearch()}
+                disabled={isLoadingPlant}
+                className="bg-gradient-to-r from-green-600 to-emerald-500 hover:from-green-700 hover:to-emerald-600 text-white px-6 py-3.5 rounded-2xl font-medium transition-all shadow-lg shadow-green-600/20 disabled:opacity-70 flex items-center justify-center min-w-[110px]"
+              >
+                {isLoadingPlant ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Search'}
+              </button>
+            </div>
+          </div>
+
+          {/* Plant Details Area */}
+          <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+            {plantError && (
+              <div className="bg-red-50/80 dark:bg-red-900/30 text-red-700 dark:text-red-300 p-4 rounded-2xl flex items-start gap-3 border border-red-200 dark:border-red-800 mb-4 backdrop-blur-sm">
+                <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0" />
+                <p>{plantError}</p>
+              </div>
+            )}
+
+            {!isLoadingPlant && !plantDetails && !plantError && (
+              <div className="h-full flex flex-col items-center justify-center text-green-600/60 dark:text-green-400/50 text-center px-4">
+                <div className="p-6 bg-green-100/50 dark:bg-green-900/30 rounded-full mb-6">
+                  <Sprout className="w-16 h-16" />
+                </div>
+                <h3 className="text-xl font-serif font-medium text-green-800 dark:text-green-200 mb-2">Welcome to your Garden</h3>
+                <p className="text-sm">Search for any plant to uncover its care secrets.</p>
+              </div>
+            )}
+
+            {isLoadingPlant && (
+              <div className="h-full flex flex-col items-center justify-center text-green-600 dark:text-green-400 space-y-6">
+                <div className="relative">
+                  <Loader2 className="w-12 h-12 animate-spin text-emerald-500" />
+                  <Leaf className="w-5 h-5 absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-green-700 dark:text-green-300" />
+                </div>
+                <p className="animate-pulse font-medium">Gathering botanical wisdom...</p>
+              </div>
+            )}
+
+            {}
+            {plantDetails && !isLoadingPlant && (
+              <div className="space-y-5 animate-in fade-in duration-700 slide-in-from-bottom-4">
+                {/* Header Card */}
+                <div className="bg-white/80 dark:bg-green-900/60 p-6 rounded-3xl shadow-sm border border-white/50 dark:border-green-800/50 backdrop-blur-sm relative overflow-hidden">
+                  <div className="absolute -right-4 -top-4 opacity-10">
+                    <Flower2 className="w-32 h-32 text-green-900 dark:text-green-100" />
+                  </div>
+                  <div className="relative z-10 flex justify-between items-start gap-4 flex-wrap">
+                    <div>
+                      <h2 className="text-4xl font-serif font-bold text-green-900 dark:text-green-100 mb-2 tracking-tight">
+                        {plantDetails.name}
+                      </h2>
+                      <p className="text-green-700/80 dark:text-green-300/80 italic font-serif flex items-center gap-2 text-lg">
+                        {plantDetails.scientific_name}
+                      </p>
+                    </div>
+                    <span className="px-4 py-1.5 bg-green-100 dark:bg-green-800 text-green-800 dark:text-green-100 rounded-full text-sm font-semibold shadow-sm border border-green-200 dark:border-green-700">
+                      {plantDetails.indoor_outdoor}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Core Requirements Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <DetailCard icon={<Droplet className="w-5 h-5 text-teal-500 dark:text-teal-400" />} title="Watering" content={plantDetails.watering} />
+                  <DetailCard icon={<Sun className="w-5 h-5 text-amber-500 dark:text-amber-400" />} title="Sunlight" content={plantDetails.sunlight} />
+                  <DetailCard icon={<Wind className="w-5 h-5 text-stone-600 dark:text-stone-400" />} title="Soil" content={plantDetails.soil} />
+                  <DetailCard icon={<Thermometer className="w-5 h-5 text-rose-500 dark:text-rose-400" />} title="Temperature" content={plantDetails.temperature} />
+                </div>
+
+                {/* Additional Info Cards */}
+                <div className="bg-white/80 dark:bg-green-900/60 p-6 rounded-3xl shadow-sm border border-white/50 dark:border-green-800/50 backdrop-blur-sm space-y-6">
+                  <Section title="Nutrition & Fertilizer" icon={<Sprout className="w-5 h-5 text-emerald-600 dark:text-emerald-400"/>}>
+                    {plantDetails.fertilizer}
+                  </Section>
+                  <Section title="Common Pests & Diseases" icon={<Bug className="w-5 h-5 text-rose-600 dark:text-rose-400"/>}>
+                    {plantDetails.common_problems}
+                  </Section>
+                  <Section title="Botanist's Care Tips" icon={<Info className="w-5 h-5 text-indigo-500 dark:text-indigo-400"/>}>
+                    {plantDetails.care_tips}
+                  </Section>
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Right Panel: AI Chatbot */}
+        <section className="w-full md:w-1/2 flex flex-col h-[60vh] md:h-full bg-white/60 dark:bg-green-950/60 backdrop-blur-xl rounded-3xl border border-white/60 dark:border-green-800/50 shadow-xl shadow-green-900/5 overflow-hidden">
+          
+          <div className="p-5 border-b border-green-200/50 dark:border-green-800/50 flex items-center gap-3 bg-white/40 dark:bg-green-900/30">
+            <div className="p-2 bg-gradient-to-br from-teal-400 to-emerald-600 rounded-full text-white shadow-md">
+              <Bot className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-green-900 dark:text-green-100">PlantGPT Expert</h2>
+              <p className="text-xs text-green-700/80 dark:text-green-400/80 font-medium">Always here to help your garden grow</p>
+            </div>
+          </div>
+
+          {/* Chat Messages Area */}
+          <div className="flex-1 overflow-y-auto p-5 space-y-5 custom-scrollbar">
+            {chatMessages.map((msg, idx) => (
+              <div 
+                key={idx} 
+                className={`flex gap-3 max-w-[85%] ${msg.role === 'user' ? 'ml-auto flex-row-reverse' : 'mr-auto'} animate-in fade-in slide-in-from-bottom-2 duration-300`}
+              >
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 mt-auto shadow-sm ${
+                  msg.role === 'user' 
+                    ? 'bg-green-200 dark:bg-green-800 text-green-800 dark:text-green-200' 
+                    : 'bg-emerald-100 dark:bg-emerald-900/80 text-emerald-700 dark:text-emerald-300'
+                }`}>
+                  {msg.role === 'user' ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+                </div>
+                <div className={`p-4 shadow-sm ${
+                  msg.role === 'user' 
+                    ? 'bg-gradient-to-br from-green-600 to-emerald-600 text-white rounded-t-2xl rounded-bl-2xl rounded-br-sm' 
+                    : 'bg-white/90 dark:bg-green-900/80 text-green-950 dark:text-green-50 rounded-t-2xl rounded-br-2xl rounded-bl-sm border border-white/50 dark:border-green-700/50 backdrop-blur-sm'
+                }`}>
+                  <p className="whitespace-pre-wrap text-[15px] leading-relaxed">
+                    {msg.role === 'model' ? formatText(msg.text) : msg.text}
+                  </p>
+                </div>
+              </div>
+            ))}
+            
+            {isChatLoading && (
+              <div className="flex gap-3 max-w-[85%] mr-auto animate-in fade-in">
+                <div className="w-8 h-8 rounded-full mt-auto shadow-sm bg-emerald-100 dark:bg-emerald-900/80 text-emerald-700 dark:text-emerald-300 flex items-center justify-center">
+                  <Bot className="w-4 h-4" />
+                </div>
+                <div className="p-5 bg-white/90 dark:bg-green-900/80 rounded-t-2xl rounded-br-2xl rounded-bl-sm border border-white/50 dark:border-green-700/50 backdrop-blur-sm flex items-center gap-1.5 shadow-sm">
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                </div>
+              </div>
+            )}
+            <div ref={chatEndRef} className="h-1" />
+          </div>
+
+          {/* Chat Input */}
+          <div className="p-4 bg-white/60 dark:bg-green-950/40 border-t border-green-200/50 dark:border-green-800/50 backdrop-blur-md">
+            <form onSubmit={handleSendMessage} className="relative flex items-end gap-2">
+              <textarea
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage(e);
+                  }
+                }}
+                placeholder={plantDetails ? `Ask about your ${plantDetails.name}...` : "Ask a plant care question..."}
+                className="w-full pl-5 pr-14 py-3.5 rounded-3xl border-0 ring-1 ring-green-200 dark:ring-green-800 bg-white/90 dark:bg-green-900/60 focus:outline-none focus:ring-2 focus:ring-emerald-500 transition-all resize-none text-green-950 dark:text-white max-h-32 shadow-inner"
+                rows="1"
+                style={{ minHeight: '52px' }}
+              />
+              <button
+                type="submit"
+                disabled={isChatLoading || !chatInput.trim()}
+                className="absolute right-2 bottom-2 p-2.5 bg-gradient-to-r from-green-600 to-emerald-500 hover:from-green-700 hover:to-emerald-600 text-white rounded-full transition-all disabled:opacity-50 disabled:hover:from-green-600 shadow-md"
+              >
+                <Send className="w-4 h-4 translate-x-[-1px] translate-y-[1px]" />
+              </button>
+            </form>
+            <p className="text-center text-[11px] font-medium text-green-700/60 dark:text-green-400/60 mt-3">
+              AI advice is helpful, but always verify critical treatments.
+            </p>
+          </div>
+
+        </section>
+      </main>
+      
+      {/* Global Styles for Scrollbar */}
+      <style dangerouslySetInnerHTML={{__html: `
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background-color: rgba(16, 185, 129, 0.2);
+          border-radius: 20px;
+        }
+        .dark .custom-scrollbar::-webkit-scrollbar-thumb {
+          background-color: rgba(52, 211, 153, 0.2);
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background-color: rgba(16, 185, 129, 0.5);
+        }
+      `}} />
+    </div>
+  );
+}
+
+// ==========================================
+// Reusable UI Components
+// ==========================================
+function DetailCard({ icon, title, content }) {
+  return (
+    <div className="bg-white/70 dark:bg-green-900/40 p-5 rounded-2xl border border-white/60 dark:border-green-800/40 flex items-start gap-4 transition-all hover:bg-white/90 dark:hover:bg-green-800/50 hover:shadow-md hover:shadow-green-900/5 group">
+      <div className="p-3 bg-green-50 dark:bg-green-950/50 rounded-xl shrink-0 group-hover:scale-110 transition-transform duration-300 shadow-sm border border-green-100/50 dark:border-green-900">
+        {icon}
+      </div>
+      <div>
+        <h3 className="text-xs font-bold text-green-800/70 dark:text-green-400/80 uppercase tracking-widest mb-1.5">{title}</h3>
+        <p className="text-[15px] text-green-950 dark:text-green-50 font-medium leading-snug">{content}</p>
+      </div>
+    </div>
+  );
+}
+
+function Section({ icon, title, children }) {
+  return (
+    <div className="border-b border-green-100 dark:border-green-800/50 last:border-0 pb-5 last:pb-0">
+      <div className="flex items-center gap-3 mb-2.5">
+        <div className="p-1.5 bg-green-50 dark:bg-green-950/50 rounded-lg shadow-sm border border-green-100/50 dark:border-green-900">
+          {icon}
+        </div>
+        <h3 className="text-lg font-serif font-bold text-green-900 dark:text-green-100">{title}</h3>
+      </div>
+      <p className="text-[15px] text-green-800/90 dark:text-green-100/80 leading-relaxed pl-11">
+        {children}
+      </p>
+    </div>
+  );
+}
